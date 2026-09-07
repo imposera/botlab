@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh ToteBot Betfair target every 30 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=tb-betfair-emitter.service
+
+[Install]
+WantedBy=timers.target

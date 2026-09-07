@@ -1,0 +1,52 @@
+# Generated race data and machine-specific configuration
+/history/
+/state/
+/observations/
+/review/
+/config/
+/logs/
+/backups/
+
+# Credentials, private keys and local environment files
+.env
+.env.*
+*.env
+secrets.env*
+*credentials*.json
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+!*.env.example
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local tools, editor state and agent metadata
+.tools/
+.codex/
+.agents/
+.vscode/
+.idea/
+.DS_Store
+
+# Backups, archives and temporary files
+*.bak
+*.bak.*
+*_backup_*
+*.tar
+*.tar.gz
+*.zip
+*.log
+*.tmp
+*.swp
+*~

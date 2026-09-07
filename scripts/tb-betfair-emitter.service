@@ -1,0 +1,14 @@
+[Unit]
+Description=ToteBot Betfair target emitter
+Requires=tb-race-observer.service
+After=network-online.target tb-race-observer.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/botlab/totebot/scripts
+Environment=PYTHONPATH=/opt/betfair
+Environment=BETFAIR_SECRETS_FILE=/opt/betfair/secrets.env
+EnvironmentFile=-%h/.config/totebot/betfair-services.env
+ExecStartPre=/usr/bin/python3 %h/botlab/totebot/scripts/tb_betfair_preflight.py --role emitter
+ExecStart=/usr/bin/python3 %h/botlab/totebot/scripts/betfair_t15_emit.py
+TimeoutStartSec=120

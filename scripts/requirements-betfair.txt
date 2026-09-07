@@ -1,0 +1,2 @@
+# Install into the interpreter used by both Betfair user services.
+requests
