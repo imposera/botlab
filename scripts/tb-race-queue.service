@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh ToteBot race queue
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/botlab/totebot/scripts
+Environment=PYTHONPATH=/opt/betfair
+Environment=BETFAIR_SECRETS_FILE=/opt/betfair/secrets.env
+EnvironmentFile=-%h/.config/totebot/betfair-services.env
+ExecStart=/usr/bin/python3 %h/botlab/totebot/scripts/tb_race_queue.py refresh --limit 10 --search-hours 4
+TimeoutStartSec=120

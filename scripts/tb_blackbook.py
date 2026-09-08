@@ -16,13 +16,16 @@ Source of truth:
 Writes derived register:
     ~/botlab/totebot/state/tb_blackbook.json
 
-Version 1.3.0 keeps the register deliberately conservative:
+Version 1.5.0 keeps the register deliberately conservative:
 - automatically records every observed winner
 - keeps market profile / price path for winners
 - preserves any existing manual tags/notes/status in tb_blackbook.json
 - does not call Betfair
 - does not change raw history folders
 - filtered scans refresh one market while preserving other registered wins
+- all scans retain wins whose source history is unavailable
+- confirmed empty results revoke wins while retaining manual metadata
+- writes are serialized and unreadable existing registers are not overwritten
 
 Examples:
     python3 tb_blackbook.py scan
@@ -34,6 +37,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -49,7 +53,40 @@ from tb_race_lifecycle import scratching_break
 
 DEFAULT_BASE_DIR = Path.home() / "botlab" / "totebot"
 STATE_FILE_NAME = "tb_blackbook.json"
-VERSION = "1.3.0"
+VERSION = "1.6.0"
+
+COUNTRIES = {
+    'AU': 'Australia', 'GB': 'United Kingdom', 'US': 'United States',
+    'FR': 'France', 'ZA': 'South Africa', 'IE': 'Ireland', 'NZ': 'New Zealand',
+    'HK': 'Hong Kong', 'SG': 'Singapore', 'JP': 'Japan', 'CA': 'Canada',
+    'DE': 'Germany', 'IT': 'Italy', 'AE': 'United Arab Emirates',
+}
+COUNTRY_ALIASES = {
+    'AUS': 'AU', 'UK': 'GB', 'GBR': 'GB', 'USA': 'US', 'FRA': 'FR',
+    'RSA': 'ZA', 'ZAF': 'ZA', 'IRL': 'IE', 'NZL': 'NZ',
+    **{name.upper(): code for code, name in COUNTRIES.items()},
+}
+
+
+def market_country(market_dir, result, closed):
+    """Use explicit source geography only, falling back through captures."""
+    def country(source):
+        market = (source or {}).get('market') or {}
+        for key in ('country_code', 'country'):
+            value = str(market.get(key) or '').strip().upper()
+            code = COUNTRY_ALIASES.get(value, value)
+            if code in COUNTRIES:
+                return code
+        return None
+    for source in (result, closed):
+        code = country(source)
+        if code:
+            return code
+    for stage in reversed(STAGE_ORDER):
+        code = country(read_json(market_dir / STAGE_FILES[stage]))
+        if code:
+            return code
+    return None
 
 STAGE_FILES = {
     "t15": "market_book_t15.json",
@@ -181,11 +218,45 @@ def first_last(prices: dict[str, float]) -> tuple[float | None, float | None]:
     return first, last
 
 
-def snapshot_price_path(market_dir: Path, winner: dict[str, Any]) -> dict[str, float]:
+def matched_from_runner(runner: dict[str, Any]) -> float | None:
+    """Read reported volume, falling back to summed traded price levels."""
+    total = None
+    for key in ("total_matched", "totalMatched"):
+        try:
+            value = float(runner.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0:
+            total = value
+            break
+    if total:
+        return total
+    exchange = runner.get("ex")
+    exchange = exchange if isinstance(exchange, dict) else {}
+    for levels in (runner.get("traded_levels"), exchange.get("tradedVolume")):
+        if not isinstance(levels, list) or not levels:
+            continue
+        sizes = []
+        for level in levels:
+            try:
+                size = float(level.get("size")) if isinstance(level, dict) else -1
+            except (TypeError, ValueError):
+                break
+            if not math.isfinite(size) or size < 0:
+                break
+            sizes.append(size)
+        if len(sizes) == len(levels):
+            return sum(sizes)
+    return total
+
+
+
+def snapshot_runner_data(market_dir: Path, winner: dict[str, Any]):
     key = runner_key(winner)
     name_norm = normalise_name(winner.get("runner_name"))
     cloth = str(winner.get("cloth_number") or "")
     prices: dict[str, float] = {}
+    matched = {}
 
     for stage, file_name in STAGE_FILES.items():
         snapshot = read_json(market_dir / file_name)
@@ -216,7 +287,25 @@ def snapshot_price_path(market_dir: Path, winner: dict[str, Any]) -> dict[str, f
             price = price_from_runner(runner)
             if price is not None:
                 prices[stage] = price
-    return prices
+            market = snapshot.get("market") or {}
+            runner_amount = matched_from_runner(runner)
+            market_amount = matched_from_runner(market)
+            if market_amount is None:
+                market_amount = matched_from_runner(snapshot)
+            share = (100 * runner_amount / market_amount
+                     if runner_amount is not None and market_amount is not None
+                     and market_amount > 0 and runner_amount <= market_amount else None)
+            matched[stage] = {
+                "runner_matched": runner_amount, "market_matched": market_amount,
+                "share_pct": share, "captured_at": snapshot.get("captured_at"),
+                "currency": market.get("currency") or snapshot.get("currency"),
+                "delayed": bool(market.get("is_market_data_delayed") or snapshot.get("is_market_data_delayed")),
+            }
+    return prices, matched
+
+
+def snapshot_price_path(market_dir: Path, winner: dict[str, Any]) -> dict[str, float]:
+    return snapshot_runner_data(market_dir, winner)[0]
 
 
 def race_sort_key(race: dict[str, Any]) -> tuple[str, str]:
@@ -245,7 +334,10 @@ def completed_market_dirs(history_dir: Path, market_id: str | None = None) -> li
 
 
 def load_existing_blackbook(path: Path) -> dict[str, dict[str, Any]]:
-    existing = read_json(path) or {}
+    existing = read_json(path)
+    if path.exists() and (existing is None or not isinstance(existing.get("entries"), list)):
+        raise ValueError(f"Refusing to overwrite unreadable blackbook: {path}")
+    existing = existing or {}
     entries = existing.get("entries")
     if not isinstance(entries, list):
         return {}
@@ -278,7 +370,12 @@ def build_blackbook(base_dir: Path, market_id: str | None = None) -> dict[str, A
             winner = result.get("winner")
             winners = [winner] if isinstance(winner, dict) else []
 
-        if not winners:
+        # An explicit empty list is a confirmed result with no winners.
+        # Missing or malformed winners are not authoritative corrections.
+        if not isinstance(result.get("winners"), list) and not isinstance(result.get("winner"), dict):
+            skipped += 1
+            continue
+        if any(not isinstance(w, dict) or runner_key(w) == "name:" for w in winners):
             skipped += 1
             continue
 
@@ -288,6 +385,7 @@ def build_blackbook(base_dir: Path, market_id: str | None = None) -> dict[str, A
         refreshed_markets.add(market_id_value)
         market_start = market.get("market_start_time") or result.get("market_start_time")
         date = market_dir.parent.name
+        country_code = market_country(market_dir, result, closed)
         price_break = scratching_break([read_json(market_dir / file_name) for file_name in STAGE_FILES.values()])
 
         for winner in winners:
@@ -298,7 +396,7 @@ def build_blackbook(base_dir: Path, market_id: str | None = None) -> dict[str, A
             if key in ("sid:None", "sid:", "name:"):
                 continue
 
-            prices = snapshot_price_path(market_dir, winner)
+            prices, matched = snapshot_runner_data(market_dir, winner)
             first, last = first_last(prices)
             move = pct_move(first, last) if not price_break else None
             shape = shape_for_prices(prices) if not price_break else "⚠ scratching break"
@@ -307,6 +405,8 @@ def build_blackbook(base_dir: Path, market_id: str | None = None) -> dict[str, A
                 "date": date,
                 "market_id": market_id_value,
                 "track": market.get("track"),
+                "country_code": country_code,
+                "country": COUNTRIES.get(country_code),
                 "event_name": market.get("event_name"),
                 "market_name": market.get("market_name"),
                 "distance_metres": distance_metres(market.get("market_name")),
@@ -315,6 +415,7 @@ def build_blackbook(base_dir: Path, market_id: str | None = None) -> dict[str, A
                 "selection_id": winner.get("selection_id"),
                 "runner_name": winner.get("runner_name"),
                 "prices": prices,
+                "matched": matched,
                 "first_price": first,
                 "last_price": last,
                 "move_pct": move,
@@ -356,26 +457,26 @@ def build_blackbook(base_dir: Path, market_id: str | None = None) -> dict[str, A
             entry["last_win"] = race_record
             entry["wins"].append(race_record)
 
-    # A filtered scan replaces only markets successfully read in this scan.
-    if market_id is not None:
-        for key, old in existing_entries.items():
-            retained = [deepcopy(win) for win in old.get("wins", [])
-                        if str(win.get("market_id")) not in refreshed_markets]
-            if not retained:
-                continue
-            if key in aggregate:
-                aggregate[key]["wins"].extend(retained)
-            else:
-                aggregate[key] = deepcopy(old)
-                aggregate[key]["wins"] = retained
+    # Replace only successfully read markets, even during full scans. Missing
+    # history must not erase previously registered wins or manual research.
+    for key, old in existing_entries.items():
+        retained = [deepcopy(win) for win in old.get("wins", [])
+                    if str(win.get("market_id")) not in refreshed_markets]
+        manual = bool(old.get("tags") or old.get("notes") or
+                      old.get("status") not in (None, "auto-winner"))
+        if key in aggregate:
+            aggregate[key]["wins"].extend(retained)
+        elif retained or manual:
+            aggregate[key] = deepcopy(old)
+            aggregate[key]["wins"] = retained
 
     # Recompute summaries after merging, using race times rather than folder order.
     for key, entry in aggregate.items():
         wins = sorted(entry["wins"], key=race_sort_key)
         entry["wins"] = wins
         entry["wins_seen"] = entry["races_seen"] = len(wins)
-        entry["last_win"] = wins[-1]
-        entry["last_seen"] = max(str(win.get("date") or "") for win in wins)
+        entry["last_win"] = wins[-1] if wins else None
+        entry["last_seen"] = max((str(win.get("date") or "") for win in wins), default=None)
         entry["selection_ids"] = list(dict.fromkeys(
             win["selection_id"] for win in wins if win.get("selection_id") is not None))
         entry["tracks_seen"] = list(dict.fromkeys(
@@ -436,11 +537,16 @@ def load_blackbook(base_dir: Path) -> dict[str, Any]:
 
 def cmd_scan(args: argparse.Namespace) -> int:
     base_dir = args.base_dir.expanduser()
-    payload = build_blackbook(base_dir, args.market_id)
     output_path = base_dir / "state" / STATE_FILE_NAME
-
-    if not args.dry_run:
-        atomic_write_json(output_path, payload)
+    if args.dry_run:
+        payload = build_blackbook(base_dir, args.market_id)
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Serialize the complete read/merge/write transaction across scans.
+        with (output_path.parent / ".tb_blackbook.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            payload = build_blackbook(base_dir, args.market_id)
+            atomic_write_json(output_path, payload)
 
     print(
         f"BLACKBOOK entries={payload['entry_count']} "

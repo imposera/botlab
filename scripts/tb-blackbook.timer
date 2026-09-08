@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh ToteBot blackbook every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=5min
+AccuracySec=10s
+Unit=tb-blackbook.service
+
+[Install]
+WantedBy=timers.target

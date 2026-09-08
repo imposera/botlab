@@ -129,5 +129,98 @@ class BlackbookReview(unittest.TestCase):
     def test_version_in_output(self):
         self.assertEqual(bb.build_blackbook(self.base)['version'], bb.VERSION)
 
+    def test_country_fallback_and_normalisation(self):
+        path = self.market()
+        for raw, expected in [('USA', 'United States'), ('UK', 'United Kingdom'),
+                              ('AU', 'Australia'), ('RSA', 'South Africa'), ('UNKNOWN', None)]:
+            self.write(path / bb.STAGE_FILES['t30'], {'market': {'country_code': raw}})
+            win = bb.build_blackbook(self.base)['entries'][0]['last_win']
+            self.assertEqual(win['country'], expected)
+        self.write(path / bb.STAGE_FILES['t2'], {'market': {'country': 'New Zealand'}})
+        self.assertEqual(bb.build_blackbook(self.base)['entries'][0]['last_win']['country_code'], 'NZ')
+        self.write(path / 'closed.json', {'complete': True, 'has_result': True, 'market': {'country_code': 'IE'}})
+        self.assertEqual(bb.build_blackbook(self.base)['entries'][0]['last_win']['country'], 'Ireland')
+
+    def test_matched_same_capture_and_traded_fallback(self):
+        path = self.market()
+        self.write(path / bb.STAGE_FILES['t30'], {
+            'market': {'total_matched': 1000, 'currency': 'AUD'},
+            'runners': [{'selection_id': 10, 'total_matched': 0,
+                         'traded_levels': [{'size': 75}, {'size': 25}]}]})
+        win = bb.build_blackbook(self.base)['entries'][0]['last_win']
+        mark = win['matched']['t30']
+        self.assertEqual((mark['runner_matched'], mark['market_matched'], mark['share_pct']), (100, 1000, 10))
+        self.assertEqual(mark['currency'], 'AUD')
+        self.assertIsNone(win['matched']['t15']['share_pct'])
+        from tb_blackbook_wall import matched_summary, matched_table
+        self.assertIn('100.00 / 1,000.00 · 10.0%', matched_summary(win))
+        self.assertIn('AUD', matched_table(win))
+
+    def test_matched_invalid_denominators_and_identity(self):
+        path = self.market()
+        for total in (0, -1, 'NaN', 5, None):
+            self.write(path / bb.STAGE_FILES['t30'], {
+                'market': {'total_matched': total},
+                'runners': [{'selection_id': 10, 'totalMatched': 10}]})
+            mark = bb.build_blackbook(self.base)['entries'][0]['last_win']['matched']['t30']
+            self.assertIsNone(mark['share_pct'])
+        self.write(path / bb.STAGE_FILES['t30'], {
+            'totalMatched': 100, 'runners': [{'selection_id': 99, 'totalMatched': 10}]})
+        self.assertNotIn('t30', bb.build_blackbook(self.base)['entries'][0]['last_win']['matched'])
+
+    def test_full_scan_retains_unreadable_or_missing_history(self):
+        path = self.market()
+        self.scan()
+        state = self.base / 'state' / bb.STATE_FILE_NAME
+        payload = bb.load_blackbook(self.base)
+        payload['entries'][0]['notes'] = 'Research to keep'
+        self.write(state, payload)
+        (path / 'result.json').write_text('{broken')
+        self.scan()
+        self.assertEqual(bb.load_blackbook(self.base)['entries'], payload['entries'])
+        (path / 'result.json').unlink()
+        self.scan()
+        self.assertEqual(bb.load_blackbook(self.base)['entries'], payload['entries'])
+
+    def test_no_winner_correction_removes_win_but_keeps_manual_metadata(self):
+        for filtered in (None, '1.1'):
+            with self.subTest(filtered=filtered):
+                path = self.market()
+                self.scan()
+                state = self.base / 'state' / bb.STATE_FILE_NAME
+                payload = bb.load_blackbook(self.base)
+                payload['entries'][0]['notes'] = 'Keep research'
+                self.write(state, payload)
+                self.write(path / 'result.json', {'market_id': '1.1', 'winners': []})
+                self.scan(market_id=filtered)
+                entry = bb.load_blackbook(self.base)['entries'][0]
+                self.assertEqual(entry['wins_seen'], 0)
+                self.assertIsNone(entry['last_win'])
+                self.assertEqual(entry['notes'], 'Keep research')
+
+    def test_no_winner_correction_removes_automatic_entry(self):
+        path = self.market()
+        self.scan()
+        self.write(path / 'result.json', {'market_id': '1.1', 'winners': []})
+        self.scan(market_id='1.1')
+        self.assertEqual(bb.load_blackbook(self.base)['entries'], [])
+
+    def test_bad_winners_do_not_revoke_existing_win(self):
+        path = self.market()
+        self.scan()
+        for result in ({'market_id': '1.1'}, {'winners': [None]}, {'winners': [{}]}):
+            self.write(path / 'result.json', result)
+            self.scan()
+            self.assertEqual(bb.load_blackbook(self.base)['entries'][0]['wins_seen'], 1)
+
+    def test_corrupt_register_is_not_overwritten(self):
+        self.market()
+        state = self.base / 'state' / bb.STATE_FILE_NAME
+        self.write(state, {})
+        state.write_text('{broken')
+        with self.assertRaises(ValueError):
+            self.scan()
+        self.assertEqual(state.read_text(), '{broken')
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

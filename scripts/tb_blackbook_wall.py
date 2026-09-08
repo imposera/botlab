@@ -122,9 +122,52 @@ def cell(record):
         path = ' → '.join(f'{stage.upper()}: {prices[stage]}' for stage in ('t15', 't10', 't5', 't2', 't30') if stage in prices)
         distance = distance_metres(win.get('market_name'))
         details.append(f'<li><a href="/race/{mid}">{esc(win.get("date"))} · {esc(win.get("track"))} · {esc(win.get("market_name"))}</a>'
-                       f'<br>{esc(f"{distance:g} m" if distance is not None else "Distance unknown")} · {esc(path or "Prices unavailable")}</li>')
+                       f'<br>{esc(win.get("country") or "Country unknown")} · {esc(f"{distance:g} m" if distance is not None else "Distance unknown")} · {esc(path or "Prices unavailable")}'
+                       + matched_table(win) + '</li>')
     metadata = ''.join(d for d in details if d.startswith('<p>'))
     history = ''.join(d for d in details if d.startswith('<li>'))
     if not history:
         history = '<li>No earlier recorded wins.</li>' if record['available'] else '<li>Register or race start time unavailable.</li>'
     return '<details><summary>' + labels + '</summary>' + metadata + '<ul>' + history + '</ul></details>'
+
+
+def matched_summary(win):
+    marks = win.get('matched') or {}
+    for stage in ('t30', 't2', 't5', 't10', 't15'):
+        mark = marks.get(stage) or {}
+        if mark.get('runner_matched') is not None and mark.get('market_matched') is not None:
+            return matched_label(stage) + ': ' + matched_amount(mark['runner_matched']) + ' / ' + matched_amount(mark['market_matched']) + ' · ' + matched_share(mark.get('share_pct'))
+    return 'Unavailable'
+
+
+def matched_label(stage):
+    return 'T−30s' if stage == 't30' else 'T−' + stage[1:] + 'm'
+
+
+def matched_amount(value):
+    return '—' if value is None else f'{value:,.2f}'
+
+
+def matched_share(value):
+    return '—' if value is None else f'{value:.1f}%'
+
+
+def matched_table(win):
+    marks = win.get('matched') or {}
+    if not marks:
+        return '<p>Matched amounts unavailable.</p>'
+    rows = []
+    for stage in ('t15', 't10', 't5', 't2', 't30'):
+        if stage not in marks:
+            continue
+        mark = marks[stage]
+        unit = str(mark.get('currency') or 'Currency unspecified')
+        if mark.get('delayed'):
+            unit += ' · delayed feed'
+        rows.append('<tr><td>' + matched_label(stage) + '</td><td>' +
+                    matched_amount(mark.get('runner_matched')) + '</td><td>' +
+                    matched_amount(mark.get('market_matched')) + '</td><td>' +
+                    matched_share(mark.get('share_pct')) + '</td><td>' + html.escape(unit) + '</td></tr>')
+    return ('<p>Runner vs market matched · same capture</p><table><thead><tr><th>Stage</th>'
+            '<th>Runner</th><th>Market</th><th>Share</th><th>Currency / feed</th></tr></thead><tbody>'
+            + ''.join(rows) + '</tbody></table>')

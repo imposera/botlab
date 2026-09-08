@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh ToteBot blackbook from completed local history
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/botlab/totebot/scripts
+ExecStart=/usr/bin/python3 %h/botlab/totebot/scripts/tb_blackbook.py scan
+TimeoutStartSec=120
+

@@ -44,6 +44,26 @@ class WallTests(unittest.TestCase):
         rows = wall.build_rows({"runners": [{"selection_id": 1, "total_matched": 0}]}, {}, None)
         self.assertEqual(wall.fmt_money(rows[0]["matched"]), "0")
 
+    def test_live_polling_and_fixed_history(self):
+        live = wall.html_page(self.base)
+        self.assertNotIn('http-equiv="refresh"', live)
+        self.assertIn('src="/wall-poll.js"', live)
+        for component in ('navigation', 'race', 'summary', 'runners', 'observations', 'volume', 'watchers'):
+            self.assertEqual(live.count(f'data-poll="{component}"'), 1)
+        self.race('1.1', 1)
+        historical = wall.html_page(self.base, '1.1')
+        self.assertNotIn('src="/wall-poll.js"', historical)
+        self.assertNotIn('id="poll-status"', historical)
+
+    def test_poll_script_route(self):
+        handler = object.__new__(wall.WallHandler)
+        handler.path = '/wall-poll.js'
+        handler.send_text = Mock()
+        handler.do_GET()
+        script, content_type = handler.send_text.call_args.args
+        self.assertEqual(content_type, 'text/javascript; charset=utf-8')
+        self.assertIn('setInterval(poll, 15000)', script)
+
     def test_navigation_completed_current(self):
         self.race('1.1', 1)
         self.race('1.2', 2)
@@ -128,6 +148,10 @@ class WallTests(unittest.TestCase):
         runner = {'selection_id': 1, 'runner_name': 'Example', 'last_price_traded': 10}
         first = {'market': market, 'runners': [runner]}
         last = {'market': market, 'runners': [{**runner, 'last_price_traded': 5}]}
+        last['runners'].extend([
+            {'selection_id': 2, 'runner_name': 'Only One Capture', 'last_price_traded': 8},
+            {'selection_id': 3, 'runner_name': 'No Prices'},
+        ])
         (race / 'market_book_t15.json').write_text(json.dumps(first))
         (race / 'market_book_t30.json').write_text(json.dumps(last))
         (race / 'result.json').write_text(json.dumps({'winner': runner}))
@@ -137,7 +161,9 @@ class WallTests(unittest.TestCase):
         live = wall.html_page(self.base)
         historical = wall.html_page(self.base, '1.1')
         for page in (live, historical):
-            self.assertIn('<tr class="winner">', page)
+            self.assertNotIn('>Only One Capture</td>', page)
+            self.assertNotIn('>No Prices</td>', page)
+            self.assertIn('<tr class="winner" data-poll-key="1.1:1">', page)
             self.assertIn('▼ · Steady firm', page)
             self.assertIn('Shape color legend', page)
             self.assertIn('T−15m, T−30s', page)
@@ -145,6 +171,8 @@ class WallTests(unittest.TestCase):
             self.assertIn('shape-badge:focus-visible', page)
         self.assertIn('▼ · Steady firm · so far</span>', live)
         self.assertIn('▼ · Steady firm</span>', historical)
+        (race / 'market_book_t15.json').unlink()
+        self.assertIn('Waiting for runners with at least two price captures.', wall.html_page(self.base))
 
     def test_shape_uses_review_classifier(self):
         from tb_review import shape_class

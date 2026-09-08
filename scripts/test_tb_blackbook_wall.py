@@ -86,6 +86,12 @@ class BlackbookWallTests(unittest.TestCase):
         state = self.base / 'state'
         (state / 'active_market_book.json').write_text(json.dumps({'market': self.market, 'runners': [
             {'selection_id': 99, 'runner_name': 'Favourite'}, {'selection_id': 10, 'runner_name': 'Example'}]}))
+        race = self.base / 'history' / '2026-09-03' / '1.3'
+        race.mkdir(parents=True)
+        for filename in ('market_book_t15.json', 'market_book_t30.json'):
+            (race / filename).write_text(json.dumps({'market': self.market, 'runners': [
+                {'selection_id': 99, 'last_price_traded': 2},
+                {'selection_id': 10, 'last_price_traded': 5}]}))
         page = wall.html_page(self.base, sort_by='td')
         self.assertLess(page.index('>Example</td>'), page.index('>Favourite</td>'))
         filtered = wall.html_page(self.base, blackbook_only=True)

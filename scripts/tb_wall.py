@@ -34,14 +34,16 @@ from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from tb_blackbook import matched_from_runner
 from tb_blackbook_wall import cell as blackbook_cell, enrich_rows
+from tb_blackbook_page import page as blackbook_page
 from tb_market_volume import panel as volume_panel
 from tb_review import shape_class
 from tb_race_lifecycle import load_lifecycle, policy as observation_policy, scratching_break
 from tb_race_observation_wall import panel as observation_panel, timing_label
 
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 HISTORY_CACHE_SECONDS = 60.0
 DEFAULT_BASE_DIR = Path.home() / "botlab" / "totebot"
 STATE_DIR_NAME = "state"
@@ -162,37 +164,6 @@ def fmt_money(value: Any) -> str:
         return f"{number / 1000:.1f}k"
     return f"{number:.0f}"
 
-
-def matched_from_runner(runner: dict[str, Any]) -> float | None:
-    """Read reported volume, falling back to summed traded price levels."""
-    total = None
-    for key in ("total_matched", "totalMatched"):
-        try:
-            value = float(runner.get(key))
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(value) and value >= 0:
-            total = value
-            break
-    if total:
-        return total
-    exchange = runner.get("ex")
-    exchange = exchange if isinstance(exchange, dict) else {}
-    for levels in (runner.get("traded_levels"), exchange.get("tradedVolume")):
-        if not isinstance(levels, list) or not levels:
-            continue
-        sizes = []
-        for level in levels:
-            try:
-                size = float(level.get("size")) if isinstance(level, dict) else -1
-            except (TypeError, ValueError):
-                break
-            if not math.isfinite(size) or size < 0:
-                break
-            sizes.append(size)
-        if len(sizes) == len(levels):
-            return sum(sizes)
-    return total
 
 
 def price_from_runner(runner: dict[str, Any]) -> float | None:
@@ -605,6 +576,7 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
     snapshot_prices = load_snapshot_prices(history_dir)
     result, closed = result_files(history_dir)
     rows = build_rows(display_book, snapshot_prices, result)
+    rows = [row for row in rows if len(row['prices']) >= 2]
     if history_dir and scratching_break([read_json(history_dir / file_name) for file_name in SNAPSHOT_FILES.values()]):
         for row in rows:
             row['shape_class'], row['move'] = 'scratching_break', None
@@ -646,7 +618,7 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
         price_cells = "".join(f"<td>{html.escape(fmt_price(row['prices'].get(stage)))}</td>" for stage in STAGES)
         rows_html.append(
             f"""
-            <tr class="{cls}">
+            <tr class="{cls}" data-poll-key="{html.escape(str(market_id) + ':' + str(row['selection_id']), quote=True)}">
               <td class="num">{html.escape(str(row['no']))}</td>
               <td class="horse">{html.escape(name)}</td>
               <td class="blackbook">{blackbook_cell(row['blackbook'])}</td>
@@ -659,7 +631,8 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
         )
 
     if not rows_html:
-        empty = 'No matching blackbook runners.' if blackbook_only else 'No runner snapshot available yet.'
+        empty = ('No matching blackbook runners with at least two price captures.' if blackbook_only
+                 else 'Waiting for runners with at least two price captures.')
         rows_html.append(f'<tr><td colspan="11" class="muted centre">{empty}</td></tr>')
 
     interest_line = "—"
@@ -726,7 +699,7 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  {'<meta http-equiv="refresh" content="15">' if is_live_view else ''}
+  {'<script src="/wall-poll.js" defer></script>' if is_live_view else ''}
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ToteBot Mini Wall</title>
   <style>
@@ -793,8 +766,8 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
 </head>
 <body>
 <main>
-  <nav class="nav">{previous_link}{current_link}{next_link}</nav>
-  <section class="top">
+  <nav class="nav" data-poll="navigation">{previous_link}{current_link}{next_link}<a href="/blackbook">Blackbook</a></nav>
+  <section class="top" data-poll="race">
     <div>
       <h1>🏇 {html.escape(title)} <span class="{view_badge_class}">{view_badge}</span></h1>
       <div class="sub">Market {html.escape(market_id or "—")} · Start {html.escape(str(market_start_time or "—"))}</div>
@@ -803,14 +776,14 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
     <div class="tminus">{html.escape(observation_label) if observation_label else ('T ' + html.escape(fmt_tminus(tminus))) if is_live_view else 'FINAL'}</div>
   </section>
 
-  <section class="grid">
+  <section class="grid" data-poll="summary">
     <div class="card"><div class="label">Track</div><div class="value">{html.escape(str(market.get("track") or "—"))}</div></div>
     <div class="card"><div class="label">Race</div><div class="value">{html.escape(str(market.get("market_name") or "—"))}</div></div>
     <div class="card"><div class="label">Winner</div><div class="value">{html.escape(winner_label)}</div></div>
     <div class="card"><div class="label">Slots</div><div class="chips">{slots}</div></div>
   </section>
 
-  <p class="small">Blackbook: {html.escape(blackbook_label)}. Recorded wins before this race: W = all, T = track, D = exact distance, T+D = both. ★ = tagged. — = unknown. Manual metadata is current.</p>
+  <p class="small" data-poll="blackbook">Blackbook: {html.escape(blackbook_label)}. Recorded wins before this race: W = all, T = track, D = exact distance, T+D = both. ★ = tagged. — = unknown. Manual metadata is current.</p>
   <form class="filters" method="get">
     <label><input type="checkbox" name="blackbook" value="1" {'checked' if blackbook_only else ''}> Blackbook runners only</label>
     <label>Sort <select name="sort"><option value="price" {'selected' if sort_by != 'td' else ''}>Price</option><option value="td" {'selected' if sort_by == 'td' else ''}>Track + distance wins</option></select></label>
@@ -818,22 +791,23 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
   </form>
   <div class="table-scroll"><table>
     <thead><tr><th class="num">No</th><th class="horse">Horse</th><th>Blackbook</th><th>T15</th><th>T10</th><th>T5</th><th>T2</th><th>T30</th><th>Move</th><th>Shape</th><th>Matched</th></tr></thead>
-    <tbody>{"".join(rows_html)}</tbody>
+    <tbody data-poll="runners">{"".join(rows_html)}</tbody>
   </table></div>
   {shape_legend()}
-  {observation_html}
+  <div data-poll="observations">{observation_html}</div>
 
-  <p class="small">Market matched: {html.escape(fmt_money(market_matched))} · Runner matched amounts above are as reported; — means unavailable.</p>
-  {volume_html}
+  <p class="small" data-poll="matched">Market matched: {html.escape(fmt_money(market_matched))} · Runner matched amounts above are as reported; — means unavailable.</p>
+  <div data-poll="volume">{volume_html}</div>
 
-  <section class="grid" style="margin-top:12px;">
+  <section class="grid" style="margin-top:12px;" data-poll="watchers">
     <div class="card"><div class="label">Capture watcher</div><div class="value">{html.escape(capture_line)}</div></div>
     <div class="card"><div class="label">Result watcher</div><div class="value">{html.escape(result_line)}</div></div>
     <div class="card"><div class="label">Interest alert</div><div class="value">{html.escape(interest_line)}</div></div>
     <div class="card"><div class="label">Generated</div><div class="value">{html.escape(generated)}</div></div>
   </section>
 
-  <p class="small">Read-only mini wall v{VERSION}. {('Live view auto-refreshes every 15 seconds.' if is_live_view else 'Historical view is fixed; use Current to return live.')} Base directory: {html.escape(str(base_dir))}</p>
+  <p class="small">Read-only mini wall v{VERSION}. {('Live view checks for updates every 15 seconds in the background.' if is_live_view else 'Historical view is fixed; use Current to return live.')} Base directory: {html.escape(str(base_dir))}</p>
+  {'<p id="poll-status" class="small" role="status" aria-live="polite">Waiting for background update.</p>' if is_live_view else ''}
 </main>
 </body>
 </html>
@@ -880,8 +854,15 @@ class WallHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         query = parse_qs(urlparse(self.path).query)
+        if path in ('/blackbook', '/blackbook/'):
+            self.send_text(blackbook_page(self.base_dir, query), 'text/html; charset=utf-8')
+            return
         options = {'blackbook_only': query.get('blackbook') == ['1'],
                    'sort_by': 'td' if query.get('sort') == ['td'] else 'price'}
+        if path == '/wall-poll.js':
+            self.send_text(Path(__file__).with_name('tb_wall_poll.js').read_text(),
+                           'text/javascript; charset=utf-8')
+            return
         if path in ("/", "/wall", "/current"):
             self.send_text(html_page(self.base_dir, **options), "text/html; charset=utf-8")
             return
