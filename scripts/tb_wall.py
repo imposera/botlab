@@ -21,6 +21,8 @@ LAN/Tailscale:
 
 from __future__ import annotations
 
+from tb_runner_shape import shape_symbols
+
 import argparse
 import html
 import json
@@ -38,12 +40,17 @@ from tb_blackbook import matched_from_runner
 from tb_blackbook_wall import cell as blackbook_cell, enrich_rows
 from tb_blackbook_page import page as blackbook_page
 from tb_market_volume import panel as volume_panel
-from tb_review import shape_class
+from tb_runner_shape import shape_class
 from tb_race_lifecycle import load_lifecycle, policy as observation_policy, scratching_break
 from tb_race_observation_wall import panel as observation_panel, timing_label
+from tb_queue_summary import summary as queue_summary, panel as queue_panel
+from tb_today_card import summary as today_card_summary, panel as today_card_panel
+from tb_au_capture_wall import response as capture_response
+from tb_next_five import response as next_five_response
+from tb_au_coverage import summary as au_coverage_summary, panel as au_coverage_panel
 
 
-VERSION = "1.5.1"
+VERSION = "1.9.0"
 HISTORY_CACHE_SECONDS = 60.0
 DEFAULT_BASE_DIR = Path.home() / "botlab" / "totebot"
 STATE_DIR_NAME = "state"
@@ -58,20 +65,6 @@ SNAPSHOT_FILES = {
 }
 
 STAGES = ["T-15", "T-10", "T-5", "T-2", "T-30"]
-
-SHAPE_STYLES = {
-    "steady_firm": ("Steady firm", "Consistent shortening", "#80d8a3", "#163e2c"),
-    "steady_drift": ("Steady drift", "Consistent lengthening", "#f0cc78", "#44351c"),
-    "late_firm": ("Late firm", "Latest direction is shortening", "#79d9d0", "#153d3b"),
-    "late_drift": ("Late drift", "Latest direction is lengthening", "#ffb779", "#493020"),
-    "v_shape": ("V-shape", "Shortened, then lengthened", "#d6b5ff", "#372749"),
-    "whipsaw": ("Whipsaw", "Repeated direction changes", "#d6b5ff", "#372749"),
-    "flat_hold": ("Flat hold", "Small overall price range", "#a9c6e5", "#243448"),
-    "insufficient": ("Insufficient", "Fewer than two usable prices", "#c0c7d0", "#303640"),
-    "mixed": ("Mixed", "No other shape classification applies", "#c0c7d0", "#303640"),
-    "scratching_break": ("Scratching break", "Runner removal may have adjusted the field's prices", "#f0cc78", "#44351c"),
-}
-
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -389,48 +382,46 @@ def pct_move(first: float | None, last: float | None) -> float | None:
 
 
 def shape_for_prices(stage_prices: dict[str, float]) -> str:
-    pieces: list[str] = []
-    previous: float | None = None
-    for stage in STAGES:
-        current = stage_prices.get(stage)
-        if previous is not None and current is not None:
-            if current < previous:
-                pieces.append("▼")
-            elif current > previous:
-                pieces.append("▲")
-            else:
-                pieces.append("▬")
-        if current is not None:
-            previous = current
-    return "".join(pieces) or "—"
+    return shape_symbols(stage_prices)
+
+
+def early_shape_symbols(row: dict[str, Any]) -> str:
+    """Color only observed early intervals; never imply direction across removals."""
+    symbols = row["shape"]
+    if row["shape_class"] == "scratching_break":
+        return html.escape(symbols)
+    rendered = []
+    for index, symbol in enumerate(symbols):
+        direction = {"▲": "drift", "▼": "firm", "▬": "flat"}.get(symbol)
+        if index < 3 and direction:
+            interval = ("T−15→T−10", "T−10→T−5", "T−5→T−2")[index]
+            rendered.append(f'<span class="early-{direction}" title="{interval}: {direction}">{symbol}</span>')
+        else:
+            rendered.append(html.escape(symbol))
+    return "".join(rendered)
 
 
 def shape_badge(row: dict[str, Any], live: bool) -> str:
-    category = row["shape_class"]
-    label, description, _, _ = SHAPE_STYLES.get(category, SHAPE_STYLES["mixed"])
-    if category not in SHAPE_STYLES:
-        category = "mixed"
     prices = row["prices"]
     stages = ", ".join("T−30s" if stage == "T-30" else stage.replace("-", "−") + "m"
                        for stage in STAGES if stage in prices) or "none"
     first, last = first_last(prices)
     suffix = " · so far" if live else ""
-    tooltip = (f"{label}{suffix}: {description}. Available stages: {stages}. "
+    tooltip = (f"Price direction{suffix}. Available stages: {stages}. "
                f"First → last: {fmt_price(first)} → {fmt_price(last)}. "
                f"Net movement: {fmt_pct(row['move'])}.")
-    return (f'<span class="shape-badge shape-{category}" tabindex="0" '
+    return (f'<span class="shape-badge" tabindex="0" '
             f'title="{html.escape(tooltip, quote=True)}" aria-label="{html.escape(tooltip, quote=True)}">'
-            f'{html.escape(row["shape"])} · {label}{suffix}</span>')
+            f'{early_shape_symbols(row)}</span>')
 
 
 def shape_legend() -> str:
-    badges = " ".join(
-        f'<span class="shape-badge shape-{category}" title="{description}">{label}</span>'
-        for category, (label, description, _, _) in SHAPE_STYLES.items() if category != "mixed"
-    )
+    badges = ('<span class="shape-badge early-drift">▲ Drift</span> '
+              '<span class="shape-badge early-firm">▼ Firm</span> '
+              '<span class="shape-badge early-flat">▬ Flat</span>')
     return ('<details class="shape-legend"><summary>Shape color legend</summary>'
             f'<div class="strip">{badges}</div>'
-            '<p class="small">Shapes describe the available price path. Move shows the net change. '
+            '<p class="small">Early colors apply to T−15→T−10, T−10→T−5 and T−5→T−2: blue drift, red firm, transparent flat (unchanged price). The T−2→T−30s symbol is uncolored. Shapes describe the available price path. ? means a missing interval. Move shows the net change. '
             'Live shapes are “so far”. Colors describe price direction, not a betting rating.</p></details>')
 
 
@@ -521,7 +512,8 @@ def latest_market_from_state(target: dict[str, Any], active_book: dict[str, Any]
 
 
 def html_page(base_dir: Path, requested_market_id: str | None = None,
-              blackbook_only: bool = False, sort_by: str = "price") -> str:
+              blackbook_only: bool = False, sort_by: str = "price",
+              card_meeting: str = '', card_view: str = 'all') -> str:
     state_dir = base_dir / STATE_DIR_NAME
 
     target_path = state_dir / "betfair_t15_target.json"
@@ -690,10 +682,13 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
     volume_html = volume_panel(base_dir, volume_book, history_dir, live=is_live_view)
     observation_html = observation_panel(base_dir, {**market, 'market_id': market_id}, live=is_live_view)
     observation_label = timing_label(base_dir, {**market, 'market_id': market_id}) if is_live_view else None
-    shape_css = "\n".join(
-        f'.shape-badge.shape-{category} {{ color:{foreground}; background:{background}; }}'
-        for category, (_, _, foreground, background) in SHAPE_STYLES.items()
-    )
+    shape_css = """
+    .shape-badge { color:#c0c7d0; background:transparent; }
+    .early-drift { color:#8bc4ff; background:#173b60; }
+    .early-firm { color:#ff9b9b; background:#562626; }
+    .early-flat { color:inherit; background:transparent; }
+    .shape-badge > span { border-radius:3px; padding:1px 3px; }
+    """
 
     return f'''<!doctype html>
 <html lang="en">
@@ -766,7 +761,7 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
 </head>
 <body>
 <main>
-  <nav class="nav" data-poll="navigation">{previous_link}{current_link}{next_link}<a href="/blackbook">Blackbook</a></nav>
+  <nav class="nav" data-poll="navigation">{previous_link}{current_link}{next_link}<a href="/blackbook">Blackbook</a><a href="/next-five">Next five AU</a></nav>
   <section class="top" data-poll="race">
     <div>
       <h1>🏇 {html.escape(title)} <span class="{view_badge_class}">{view_badge}</span></h1>
@@ -793,11 +788,15 @@ def html_page(base_dir: Path, requested_market_id: str | None = None,
     <thead><tr><th class="num">No</th><th class="horse">Horse</th><th>Blackbook</th><th>T15</th><th>T10</th><th>T5</th><th>T2</th><th>T30</th><th>Move</th><th>Shape</th><th>Matched</th></tr></thead>
     <tbody data-poll="runners">{"".join(rows_html)}</tbody>
   </table></div>
+  {queue_panel(queue_summary(state_dir)) if is_live_view else ''}
+  {today_card_panel(today_card_summary(state_dir, meeting=card_meeting, view=card_view), blackbook_only=blackbook_only, sort_by=sort_by) if is_live_view else ''}
+  {au_coverage_panel(au_coverage_summary(state_dir)) if is_live_view else ''}
   {shape_legend()}
   <div data-poll="observations">{observation_html}</div>
 
   <p class="small" data-poll="matched">Market matched: {html.escape(fmt_money(market_matched))} · Runner matched amounts above are as reported; — means unavailable.</p>
   <div data-poll="volume">{volume_html}</div>
+
 
   <section class="grid" style="margin-top:12px;" data-poll="watchers">
     <div class="card"><div class="label">Capture watcher</div><div class="value">{html.escape(capture_line)}</div></div>
@@ -854,11 +853,33 @@ class WallHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         query = parse_qs(urlparse(self.path).query)
+        if path in ('/au-captures', '/api/au-capture', '/next-five', '/api/next-five'):
+            body, content_type, status = (next_five_response if path in ('/next-five', '/api/next-five') else capture_response)(self.base_dir, path, query)
+            self.send_text(body, content_type, status=status)
+            return
+        if path == '/api/au-coverage':
+            data = au_coverage_summary(self.base_dir / STATE_DIR_NAME)
+            self.send_text(json.dumps(data, indent=2) + '\n', 'application/json; charset=utf-8',
+                           status=503 if data['freshness'] == 'unavailable' else 200)
+            return
+        if path == '/api/today-card':
+            data = today_card_summary(self.base_dir / STATE_DIR_NAME,
+                                      meeting=query.get('meeting', [''])[0], view=query.get('view', ['all'])[0])
+            self.send_text(json.dumps(data, indent=2) + '\n', 'application/json; charset=utf-8',
+                           status=503 if data['freshness'] == 'unavailable' else 200)
+            return
+        if path == '/api/queue-summary':
+            data = queue_summary(self.base_dir / STATE_DIR_NAME)
+            self.send_text(json.dumps(data, indent=2) + '\n', 'application/json; charset=utf-8',
+                           status=503 if data['freshness'] == 'unavailable' else 200)
+            return
         if path in ('/blackbook', '/blackbook/'):
             self.send_text(blackbook_page(self.base_dir, query), 'text/html; charset=utf-8')
             return
         options = {'blackbook_only': query.get('blackbook') == ['1'],
-                   'sort_by': 'td' if query.get('sort') == ['td'] else 'price'}
+                   'sort_by': 'td' if query.get('sort') == ['td'] else 'price',
+                   'card_meeting': query.get('card_meeting', [''])[0],
+                   'card_view': query.get('card_view', ['all'])[0]}
         if path == '/wall-poll.js':
             self.send_text(Path(__file__).with_name('tb_wall_poll.js').read_text(),
                            'text/javascript; charset=utf-8')

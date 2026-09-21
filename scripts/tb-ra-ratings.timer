@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh Racing Australia ratings hourly
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=1h
+[Install]
+WantedBy=timers.target

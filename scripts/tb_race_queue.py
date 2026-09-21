@@ -14,7 +14,8 @@ Purpose
 Important
 ---------
 This version never auto-prunes a race.  A PRUNE? recommendation is advisory.
-Only an explicit human REMOVE makes a race ineligible.
+Only an explicit human REMOVE hides a race from the human queue.
+Learned clash preferences can separately make it ineligible for automatic arming.
 
 Files
 -----
@@ -45,8 +46,10 @@ from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from tb_queue_policy import annotate, learn
+from tb_track_priority import load as load_track_priority, clash_preferences
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def utc_now() -> datetime:
@@ -446,6 +449,25 @@ def row_for_market(
     }
 
 
+
+def apply_track_preferences(rows, decisions, config_dir, now):
+    try:
+        priority = load_track_priority(config_dir)
+    except (ValueError, OSError):
+        return rows
+    config = load_priority_config(config_dir)
+    def allowed(row):
+        text = ' '.join(str(row.get(k) or '').strip().lower() for k in ('track', 'event_name', 'market_name', 'country_code'))
+        return not config.get('enabled') or not any(str(t).strip().lower() in text for t in config.get('exclude_terms', []) if str(t).strip())
+    _, skipped = clash_preferences([r for r in rows if r.get('arming_eligible')], decisions,
+                                   priority, now, alternative_allowed=allowed)
+    by_id = {r['market_id']:r for r in skipped}
+    for row in rows:
+        if str(row['market_id']) in by_id:
+            row.update(arming_eligible=False, clash_skip=by_id[str(row['market_id'])])
+    return rows
+
+
 def refresh_queue(
     state_dir: Path,
     config_dir: Path,
@@ -472,6 +494,8 @@ def refresh_queue(
             for idx, market in enumerate(markets, start=1)
         ]
 
+        rows = annotate(rows, decisions, learn(state_dir, utc_now()), utc_now())
+        rows = apply_track_preferences(rows, decisions, config_dir, utc_now())
         queue = {
             "schema": "tb_race_queue/v1",
             "version": VERSION,
@@ -482,6 +506,7 @@ def refresh_queue(
             "policy": {
                 "ordering": "betfair_market_start_time",
                 "auto_prune": False,
+                "learned_clash_skip": True,
                 "human_remove_required_for_ineligible": True,
             },
             "decisions": decisions,
@@ -498,6 +523,7 @@ def update_decision(
     market_id: str,
     action: str | None,
     reason: str | None,
+    *, race_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = state_dir / QUEUE_FILE_NAME
     queue = load_queue_for_update(state_dir)
@@ -510,6 +536,10 @@ def update_decision(
 
     races = queue.get("races") if isinstance(queue.get("races"), list) else []
     row = next((r for r in races if str(r.get("market_id")) == market_id), None)
+    if row is None and race_snapshot is not None:
+        if str(race_snapshot.get('market_id')) != market_id:
+            raise ValueError('Decision snapshot market mismatch')
+        row = dict(race_snapshot)
 
     if action is None:
         decisions.pop(market_id, None)
@@ -544,6 +574,9 @@ def update_decision(
             "race_snapshot": row,
         },
     )
+    queue['races'] = annotate(queue['races'], decisions, learn(state_dir, utc_now()), utc_now())
+    queue['races'] = apply_track_preferences(queue['races'], decisions, state_dir.parent/'config', utc_now())
+    atomic_write_json(path, queue)
     return queue
 
 
@@ -555,7 +588,7 @@ def next_eligible(queue: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(row, dict):
             continue
         row = current_row(row)
-        if row.get("eligible") and row.get("seconds_to_jump") is not None and row["seconds_to_jump"] > 0:
+        if row.get("arming_eligible", row.get("eligible")) and row.get("seconds_to_jump") is not None and row["seconds_to_jump"] > 0:
             return row
     return None
 
@@ -589,7 +622,7 @@ def display(queue: dict[str, Any]) -> None:
 
     for saved_row in races:
         row = current_row(saved_row)
-        human = row.get("human_action") or "-"
+        human = "clash" if row.get("clash_skip") else (row.get("human_action") or "-")
         countdown = f"{row['minutes_to_jump']:.1f}" if row['minutes_to_jump'] is not None else "-"
         print(
             f"{int(row.get('position') or 0):>2} "
@@ -601,6 +634,10 @@ def display(queue: dict[str, Any]) -> None:
             f"{str(row.get('recommendation') or ''):<8} "
             f"{human:<8}"
         )
+
+    for row in races:
+        if row.get("clash_skip"):
+            print(f"  {row.get('market_id')}: {row['clash_skip']['reason']}")
 
     nxt = next_eligible(queue)
     print()

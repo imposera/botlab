@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TB / Today's Australian card</title>
+<style>
+:root{color-scheme:dark;font:15px system-ui;background:#0c1420;color:#e8eef7}body{max-width:1400px;margin:auto;padding:24px}a{color:#b8d6ff}header,.filters{display:flex;gap:16px;align-items:center;flex-wrap:wrap}header{justify-content:space-between}h1{font-size:25px}main{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:20px}aside{background:#142235;padding:18px;border-radius:12px;height:fit-content;position:sticky;top:16px}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:10px;border-bottom:1px solid #293c54}th{color:#99aac0}button,input,select{font:inherit;background:#1d3048;color:inherit;border:1px solid #3b506d;border-radius:6px;padding:8px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.timing-blocked{background:#482525}.timing-risk{background:#382e1b}.selected{outline:2px solid #7cafdf;background:#20364e}.forecast{white-space:normal;max-width:230px}.muted{color:#99aac0}.filters{margin:16px 0}.table-wrap{overflow:auto}#message{min-height:24px}#reason{width:100%;box-sizing:border-box}aside button{margin:10px 3px 0 0}aside p{overflow-wrap:anywhere}details{margin:12px 0}@media(max-width:900px){main{grid-template-columns:1fr}aside{position:static}body{padding:12px}}
+</style>
+<header><h1>Today's Australian card</h1><nav><a href="/">Next to go queue</a> · <a href="http://core7070:8787">TB Wall</a></nav><a href="/next-five" style="color:#b8d6ff">Next five AU</a></header>
+<div class="filters"><a href="/import-ra" style="background:#1d3048;border:1px solid #3b506d;border-radius:6px;padding:8px;text-decoration:none">Import Racing Australia pages</a><span class="muted">Upload saved Acceptances HTML, preview matches, then import ratings.</span></div>
+<p id="freshness" class="muted"></p><p id="message" role="status" aria-live="polite"></p>
+<p id="track-priority" class="muted"></p><section id="forecast"></section><div class="filters"><label>Meeting <select id="meeting"><option value="">All meetings</option></select></label><label>View <select id="view"><option value="all">All races</option><option value="upcoming">Upcoming</option><option value="clashes">Timing clashes</option><option value="review">Review / removed</option><option value="completed">Completed / closed</option></select></label><button id="reload">Reload</button></div>
+<main><div class="table-wrap"><table><thead><tr><th>Jump / Melbourne</th><th>Track / race</th><th>Race state</th><th>Selection</th><th>Decision</th><th>Emitter forecast</th></tr></thead><tbody id="rows"></tbody></table></div>
+<aside><h2 id="selected">Select a race</h2><div id="detail"></div><label>Decision reason (optional)<input id="reason" maxlength="1000"></label><div><button data-action="keep">Keep</button><button data-action="remove">Remove</button><button data-action="restore">Restore</button></div><p class="muted">These are the same decisions used by the rolling queue. Keep overrides learned preference; Restore clears your decision.</p></aside></main>
+<p class="muted">Australian thoroughbred WIN races. Melbourne calendar day. Refreshes every 15 seconds. Closed races are retained from when collection began; earlier closed races may be absent.</p>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), query=new URLSearchParams(location.search);
+let state={races:[],meetings:[]},selected=query.get('market'),busy=false,loading=false,lastSuccess=0;
+const name=r=>`${r.track_label||r.track||'—'} · ${r.market_name||'—'}`;
+const label=s=>(s||'unknown').replaceAll('_',' ');
+function text(tag,value){const e=document.createElement(tag);e.textContent=value;return e;}
+function message(value){$('message').textContent=value;}
+function details(){
+ const r=state.races.find(r=>r.market_id===selected);$('selected').textContent=r?name(r):'Select a race';$('detail').replaceChildren();
+ document.querySelectorAll('[data-action]').forEach(b=>b.disabled=busy||loading||!r?.decision_allowed||Date.now()-lastSuccess>30000);
+ if(!r)return;
+ const captures=text('a','Open saved captures');captures.href='/au-captures?'+new URLSearchParams({date:state.date,market:r.market_id});$('detail').append(captures);
+ const info=[`Market ${r.market_id}`,`Race: ${label(r.race_state)} · Selection: ${label(r.selection_status)}`,`Your decision: ${r.human_action||'None'}`,`Reason: ${r.human_reason||'—'}`];
+ if(r.clash_skip)info.push(r.clash_skip.reason);
+ if(r.emitter_forecast){
+  const f=r.emitter_forecast;info.push((r.forecast_fresh?'Forecast: ':'Cached forecast: ')+label(f.outcome));info.push(f.reason);
+  const time=v=>new Date(v).toLocaleTimeString('en-AU',{timeZone:'Australia/Melbourne',hour:'2-digit',minute:'2-digit'});
+  info.push(`Arming window: ${time(f.window_open)}–${time(f.window_close)}`);
+  if(f.projected_arm_at)info.push(`Projected arm: ${time(f.projected_arm_at)}`);
+  if(f.delay_risk)info.push('Selection changes if observer release is delayed by three minutes.');
+  for(const clash of f.timing_clashes||[])info.push(`Timing clash: ${clash.race} · ${clash.gap_seconds/60}m between jumps`);
+ }
+ if(r.winners?.length)info.push('Winner: '+r.winners.map(w=>w.runner_name||w.selection_id).join(', '));
+ if(r.is_market_data_delayed)info.push('Betfair reports delayed market data.');
+ if(!r.decision_allowed)info.push('Decisions unavailable: race started or status unconfirmed.');
+ info.forEach(s=>$('detail').append(text('p',s)));
+}
+function render(){
+ $('rows').replaceChildren();
+ for(const r of state.races){
+  if($('meeting').value&&r.meeting_id!==$('meeting').value)continue;
+  const v=$('view').value;
+  if(v==='upcoming'&&['completed','closed','in_play'].includes(r.race_state))continue;
+  if(v==='completed'&&!['completed','closed'].includes(r.race_state))continue;
+  if(v==='clashes'&&!r.emitter_forecast?.timing_clashes?.length)continue;
+  if(v==='review'&&!['removed','clash_skip'].includes(r.selection_status))continue;
+  const tr=document.createElement('tr');const plan=r.emitter_forecast||{};if(plan.outcome==='timing_blocked')tr.classList.add('timing-blocked');else if(plan.timing_clashes?.length||plan.delay_risk)tr.classList.add('timing-risk');if(r.market_id===selected)tr.classList.add('selected');
+  const stamp=new Date(r.market_start_time).toLocaleTimeString('en-AU',{timeZone:'Australia/Melbourne',hour:'2-digit',minute:'2-digit'});
+  tr.append(text('td',stamp));const td=document.createElement('td'),b=text('button',name(r));
+  b.onclick=()=>{selected=r.market_id;$('reason').value=r.human_reason||'';render();details();};td.append(b);tr.append(td);
+  [label(r.race_state),label(r.selection_status),r.human_action||'None'].forEach(s=>tr.append(text('td',s)));
+  const tdForecast=text('td',(r.forecast_fresh?'':'Cached: ')+(plan.sequence?`Projected #${plan.sequence}`:label(plan.outcome||'pending'))+(plan.delay_risk?' · delay risk':''));tdForecast.className='forecast';tdForecast.title=plan.reason||'';tr.append(tdForecast);$('rows').append(tr);
+ }
+ if(!$('rows').children.length){const tr=document.createElement('tr'),td=text('td','No races in this view.');td.colSpan=6;tr.append(td);$('rows').append(tr);}
+ details();
+}
+function accept(data){
+ if(!Array.isArray(data.races))throw Error('Invalid card response');
+ state=data;lastSuccess=Date.now();
+ $('track-priority').textContent='Track priority: '+((data.track_priority?.tracks||[]).map(r=>`${r.track} ${r.state}`).join(' → ')||'First jump order')+'. Other meetings follow.'+(data.track_priority_error?' '+data.track_priority_error:'');
+ const old=$('meeting').value;$('meeting').replaceChildren(new Option('All meetings',''));
+ data.meetings.forEach(m=>$('meeting').add(new Option(m.track_label||m.track,m.meeting_id)));$('meeting').value=old;
+ $('freshness').textContent=`${data.date} · ${data.meeting_count} meetings · ${data.race_count} races · ${data.freshness}. Discovery: ${data.discovery_updated_at||'unavailable'} · Status checked: ${data.status_checked_at||'unavailable'}`;
+ const f=data.emitter_forecast||{};const oldOpen=$('forecast').querySelector('details')?.open;
+ $('forecast').replaceChildren();
+ if(f.counts){
+  $('forecast').append(text('p',`${f.fresh?'':'Cached / awaiting refresh · '}Emitter forecast: ${f.counts.projected} projected targets · ${f.counts.blocked} timing blocks · ${f.counts.track_priority_skips||0} track-priority skips · ${f.counts.delay_risk} delay-sensitive`));
+  $('forecast').append(text('p',`${f.selection_mode} selection · T−${f.target_minutes+f.window_minutes} to T−${f.target_minutes-f.window_minutes}. Red = timing block; amber = overlapping windows or delay risk.`));
+  (f.warnings||[]).forEach(w=>$('forecast').append(text('p',w)));
+  const details=document.createElement('details');details.open=!!oldOpen;details.append(text('summary','Projected Australian sequence'));const list=document.createElement('ol');
+  for(const r of f.sequence||[]){const stamp=new Date(r.projected_arm_at).toLocaleTimeString('en-AU',{timeZone:'Australia/Melbourne',hour:'2-digit',minute:'2-digit'});list.append(text('li',`${stamp} arm · ${r.track} · ${r.market_name}`));}details.append(list);$('forecast').append(details);
+  $('forecast').append(text('p',`Forecast only. ${f.scope} ${f.assumption} Three-minute delay sensitivity is not the maximum possible delay.`));
+ }else{$('forecast').append(text('p',f.error||'Emitter forecast pending'));}
+ render();
+}
+async function request(path,options){const response=await fetch(path,{...options,signal:AbortSignal.timeout(10000)});const data=await response.json();if(!response.ok)throw Error(data.error||data.message||'Request failed');return data;}
+async function reload(){if(busy||loading)return;loading=true;details();try{accept(await request('/api/today-card'));message(state.message);}catch(e){lastSuccess=0;message(`Card unavailable: ${e.message}`);}finally{loading=false;details();}}
+document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{
+ if(busy||loading||!selected)return;busy=true;details();
+ try{accept(await request('/api/card-decision',{method:'POST',headers:{'Content-Type':'application/json','X-Queue-Token':'__TOKEN__'},body:JSON.stringify({market_id:selected,action:b.dataset.action,reason:$('reason').value.trim()||null})}));message(`Decision saved: ${b.dataset.action}`);if(b.dataset.action==='restore')$('reason').value='';}
+ catch(e){lastSuccess=0;message(`Decision not confirmed: ${e.message}. Reload before retrying.`);}
+ finally{busy=false;details();}
+});
+$('meeting').onchange=render;$('view').onchange=render;$('reload').onclick=reload;setInterval(reload,15000);reload();
+</script></html>

@@ -1,0 +1,12 @@
+[Unit]
+Description=ToteBot queue wall tunnel to authoritative basecamp
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -o BatchMode=yes -o ConnectTimeout=10 -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 0.0.0.0:8792:127.0.0.1:8792 basecamp
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

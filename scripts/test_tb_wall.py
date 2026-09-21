@@ -132,8 +132,8 @@ class WallTests(unittest.TestCase):
                 row = wall.build_rows({'runners': [{'selection_id': 1}]}, {'sid:1': prices}, None)[0]
                 self.assertEqual(row['shape_class'], category)
                 markup = wall.shape_badge(row, live=True)
-                self.assertIn(f'shape-{category}', markup)
-                self.assertIn(label + ' · so far', markup)
+                self.assertNotIn(label, markup)
+                self.assertIn(' · so far', markup)
                 self.assertIn('Available stages:', markup)
                 self.assertIn('First → last:', markup)
                 self.assertIn('aria-label=', markup)
@@ -164,19 +164,35 @@ class WallTests(unittest.TestCase):
             self.assertNotIn('>Only One Capture</td>', page)
             self.assertNotIn('>No Prices</td>', page)
             self.assertIn('<tr class="winner" data-poll-key="1.1:1">', page)
-            self.assertIn('▼ · Steady firm', page)
+            self.assertIn('????', page)
+            self.assertNotIn('Steady firm', page)
             self.assertIn('Shape color legend', page)
             self.assertIn('T−15m, T−30s', page)
             self.assertIn('Net movement: -50.0%', page)
             self.assertIn('shape-badge:focus-visible', page)
-        self.assertIn('▼ · Steady firm · so far</span>', live)
-        self.assertIn('▼ · Steady firm</span>', historical)
+        self.assertIn('????</span>', live)
+        self.assertNotIn(' · so far</span>', live)
+        self.assertIn('????</span>', historical)
         (race / 'market_book_t15.json').unlink()
         self.assertIn('Waiting for runners with at least two price captures.', wall.html_page(self.base))
 
     def test_shape_uses_review_classifier(self):
         from tb_review import shape_class
         self.assertIs(wall.shape_class, shape_class)
+
+    def test_early_interval_colors_leave_late_and_missing_uncolored(self):
+        markup = wall.early_shape_symbols({'shape': '▲▼▬▲', 'shape_class': 'mixed'})
+        self.assertIn('early-drift', markup)
+        self.assertIn('early-firm', markup)
+        self.assertIn('T−5→T−2: flat', markup)
+        self.assertTrue(markup.endswith('▬</span>▲'))
+        self.assertEqual(markup.count('<span'), 3)
+        self.assertIn('early-flat', wall.early_shape_symbols(
+            {'shape': '▬???', 'shape_class': 'flat_hold'}))
+        for category in ('insufficient', 'scratching_break'):
+            symbols = '????' if category == 'insufficient' else '▲▼▬▲'
+            self.assertEqual(wall.early_shape_symbols(
+                {'shape': symbols, 'shape_class': category}), symbols)
 
 
 if __name__ == '__main__':

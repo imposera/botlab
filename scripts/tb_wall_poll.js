@@ -17,7 +17,13 @@
       return current;
     }
     // Preserve user-opened disclosures and in-progress controls.
-    if (current.matches('input, select, textarea, form')) return current;
+    if (current.matches('select[data-poll-options]')) {
+      const selected = current.value;
+      current.replaceChildren(...[...incoming.childNodes].map(node => node.cloneNode(true)));
+      if ([...current.options].some(option => option.value === selected)) current.value = selected;
+      return current;
+    }
+    if (current.matches('input, select, textarea, form:not([data-poll-form])')) return current;
     for (const attribute of [...current.attributes]) {
       if (current.tagName === 'DETAILS' && attribute.name === 'open') continue;
       if (!incoming.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);

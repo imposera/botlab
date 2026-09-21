@@ -36,6 +36,8 @@ Examples:
 
 from __future__ import annotations
 
+from tb_runner_shape import shape_symbols
+
 import argparse
 import fcntl
 import json
@@ -189,20 +191,7 @@ def pct_move(first: float | None, last: float | None) -> float | None:
 
 
 def shape_for_prices(prices: dict[str, float]) -> str:
-    marks: list[str] = []
-    previous: float | None = None
-    for stage in STAGE_ORDER:
-        current = prices.get(stage)
-        if previous is not None and current is not None:
-            if current < previous:
-                marks.append("▼")
-            elif current > previous:
-                marks.append("▲")
-            else:
-                marks.append("▬")
-        if current is not None:
-            previous = current
-    return "".join(marks) or "—"
+    return shape_symbols(prices)
 
 
 def first_last(prices: dict[str, float]) -> tuple[float | None, float | None]:

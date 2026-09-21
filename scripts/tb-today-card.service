@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Australian daily race card
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/botlab/totebot/scripts
+Environment=PYTHONPATH=%h/Toteboard:/opt/betfair
+Environment=BETFAIR_SECRETS_FILE=/opt/betfair/secrets.env
+EnvironmentFile=-%h/.config/totebot/betfair-services.env
+ExecStart=/usr/bin/python3 %h/botlab/totebot/scripts/tb_today_card.py
+TimeoutStartSec=180

@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from tb_race_lifecycle import scratching_break
+from tb_runner_shape import shape_class
 
 DEFAULT_BASE_DIR = Path.home() / "botlab" / "totebot"
 HISTORY_DIR_NAME = "history"
@@ -275,33 +276,6 @@ def movement_directions(stage_prices: dict[str, float]) -> list[int]:
             directions.append(0)
     return directions
 
-
-def shape_class(stage_prices: dict[str, float]) -> str:
-    directions = movement_directions(stage_prices)
-    nonzero = [direction for direction in directions if direction]
-    first, _ = first_last(stage_prices)
-
-    if len(stage_prices) < 2:
-        return "insufficient"
-    values = list(stage_prices.values())
-    # A quiet hold needs a small overall range, not merely similar endpoints.
-    if not nonzero or (first and (max(values) - min(values)) / first < 0.03):
-        return "flat_hold"
-
-    changes = sum(1 for a, b in zip(nonzero, nonzero[1:]) if a != b)
-    if changes >= 2:
-        return "whipsaw"
-    if all(direction <= 0 for direction in directions):
-        return "steady_firm"
-    if all(direction >= 0 for direction in directions):
-        return "steady_drift"
-    if changes == 1 and nonzero[0] == -1 and nonzero[-1] == 1:
-        return "v_shape"
-    if nonzero[-1] == -1:
-        return "late_firm"
-    if nonzero[-1] == 1:
-        return "late_drift"
-    return "mixed"
 
 
 def market_rank_from_first(rows: list[dict[str, Any]]) -> dict[str, int]:

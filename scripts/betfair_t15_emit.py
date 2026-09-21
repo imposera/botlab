@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import Any
 
 from tb_race_lifecycle import evaluate, load_lifecycle, policy
+from tb_queue_policy import filter_automatic
+from tb_track_priority import load as load_australian_track_priority, clash_preferences
 
 from betfair_gateway import (
     HORSE_RACING_EVENT_TYPE_ID,
@@ -64,7 +66,7 @@ PRIORITY_CONFIG_FILE_NAME = "race_priority.json"
 DEFAULT_SEARCH_HOURS = 4
 DEFAULT_TARGET_MINUTES = 15
 DEFAULT_WINDOW_MINUTES = 3
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 
 
 
@@ -187,6 +189,20 @@ def discover_markets(search_hours: int) -> list[dict[str, Any]]:
 
     markets.sort(key=lambda item: item["market_start_time"])
     return markets
+
+def automatic_queue_markets(markets, state_dir, config, target_minutes=15, window_minutes=3):
+    # A configured exclusion cannot serve as the alternative that causes a skip.
+    allowed = (lambda m: score_market(m, config)[0] > -9999) if config.get('enabled') else None
+    markets, skipped = filter_automatic(markets, state_dir, utc_now(), allowed)
+    # A later preferred race may not yet be inside its own arming window.
+    # Check configured exclusions here, not its current timing score.
+    alternative = (lambda m: not priority_excluded(m, config)) if config.get('enabled') else None
+    markets, ranked_skips = clash_preferences(markets, (read_json_file(state_dir/'tb_race_queue.json') or {}).get('decisions', {}),
+        config.get('australian_card_priority', {}), utc_now(),
+        clash_seconds=(target_minutes+window_minutes)*60,
+                minimum_alternative_seconds=(target_minutes-window_minutes)*60, alternative_allowed=alternative)
+    return markets, skipped+ranked_skips
+
 
 def find_t15_candidate(
     markets: list[dict[str, Any]],
@@ -525,6 +541,12 @@ def load_priority_config(config_dir: Path) -> dict[str, Any]:
 
     if user_config:
         config.update(user_config)
+
+    try:
+        config['australian_card_priority'] = load_australian_track_priority(config_dir)
+    except (ValueError, OSError) as exc:
+        config['australian_card_priority'] = {'tracks':[], 'apply_to_emitter':False}
+        config['australian_card_priority_error'] = f'Australian track priority unavailable ({type(exc).__name__})'
 
     return config
 
@@ -1309,12 +1331,14 @@ def main() -> int:
 
             if rearm_enabled and not hard_locked:
                 markets = discover_markets(args.search_hours)
+                markets, queue_skips = automatic_queue_markets(markets, state_dir, priority_config, args.target_minutes, args.window_minutes)
                 challenger, rearm_debug = choose_rearm_challenger(
                     active_market,
                     markets,
                     priority_config,
                     liquidity_lookup,
                 )
+                rearm_debug['queue_skips'] = queue_skips
 
                 if challenger is not None:
                     candidate = challenger["market"]
@@ -1497,12 +1521,14 @@ def main() -> int:
                 atomic_write_json(target_path, expired_target)
 
         markets = discover_markets(args.search_hours)
+        markets, queue_skips = automatic_queue_markets(markets, state_dir, priority_config, args.target_minutes, args.window_minutes)
         candidate, selection_debug = find_t15_candidate(
             markets,
             args.target_minutes,
             args.window_minutes,
             priority_config,
         )
+        selection_debug['queue_skips'] = queue_skips
         next_market = next_future_market(markets)
 
         if (
@@ -1527,6 +1553,7 @@ def main() -> int:
 
                 selection_debug = {
                     "selection_mode": "hold",
+                    "queue_skips": queue_skips,
                     "priority_enabled": True,
                     "selection_reason": "holding_for_materially_better_candidate",
                     "current_candidate_market_id": candidate.get("market_id"),

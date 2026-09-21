@@ -1,0 +1,8 @@
+[Unit]
+Description=Collect Racing Australia acceptance handicap ratings
+After=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=%h/botlab/totebot/scripts
+ExecStart=/usr/bin/python3 %h/botlab/totebot/scripts/tb_ra_ratings.py
+TimeoutStartSec=900

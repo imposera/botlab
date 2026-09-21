@@ -1,0 +1,16 @@
+[Unit]
+Description=Observe all Australian card races independently of emitter priority
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/botlab/totebot/scripts
+Environment=PYTHONPATH=%h/Toteboard:/opt/betfair
+Environment=BETFAIR_SECRETS_FILE=/opt/betfair/secrets.env
+EnvironmentFile=-%h/.config/totebot/betfair-services.env
+ExecStart=/usr/bin/python3 %h/botlab/totebot/scripts/tb_au_observer.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

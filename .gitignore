@@ -6,6 +6,10 @@
 /config/
 /logs/
 /backups/
+/acceptances/
+/html/
+/race_results/
+/recent_form/
 
 # Credentials, private keys and local environment files
 .env
@@ -38,6 +42,7 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+/codex-session-*.md
 
 # Backups, archives and temporary files
 *.bak

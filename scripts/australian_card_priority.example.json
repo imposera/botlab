@@ -1,0 +1,10 @@
+{
+  "schema": "tb_australian_track_priority/v1",
+  "apply_to_emitter": true,
+  "tracks": [
+    {"track": "Geelong", "state": "VIC"},
+    {"track": "Tuncurry", "state": "NSW"},
+    {"track": "Goulburn", "state": "NSW"}
+  ],
+  "other_track_states": {"Bordertown": "SA", "Sunshine Coast": "QLD"}
+}

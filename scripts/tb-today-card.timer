@@ -1,0 +1,11 @@
+[Unit]
+Description=Update Australian daily card every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=60s
+AccuracySec=1s
+Unit=tb-today-card.service
+
+[Install]
+WantedBy=timers.target
